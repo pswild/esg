@@ -35,11 +35,12 @@ hrly_costs = {
 
 #--- OUTPUT ---#
 
-output_file = os.path.join(here, 'output/output.csv')
+dispatch_stack_file = os.path.join(here, 'output/dispatch_stack.csv')
 
 #--- FUNCTIONS ---#
 
 def summarize_portfolios(supply):
+    '''Summarize portfolios.'''
 
     # Define weighted average.
     weighted = lambda x: np.average(x, weights=supply.loc[x.index, 'mw'])
@@ -47,12 +48,15 @@ def summarize_portfolios(supply):
     # Group by portfolio. 
     portfolios = supply.groupby('portfolio_name', as_index=False).agg(agg_cap=('mw', 'sum'), agg_fixom=('fixom', 'sum'), wa_vom=('mc', weighted))
     
+    # print(portfolios)
+
     return
 
-def simulate(supply, demand, offset=0):
+def simulate(supply, demand):
+    '''Baseline scenario for portfolio profitability using merit order dispatch.'''
 
-    # Hourly stats. 
-    hourly = pd.DataFrame()
+    # Hourly financials by portfolio. 
+    results = pd.DataFrame()
 
     for _, period in demand.iterrows():
 
@@ -94,7 +98,7 @@ def simulate(supply, demand, offset=0):
         dispatch.loc[dispatch['marginal'], 'gen'] = dispatch['mw'] - (dispatch['cumulative'] - load)
         
         # Calculate clearing price under zero profit condition. 
-        cp = dispatch.loc[marginal]['mc'] + offset
+        cp = dispatch.loc[marginal]['mc']
 
         # Calculate revenue for each unit. 
         dispatch['revenue'] = dispatch['gen'] * (cp - dispatch['mc'])
@@ -115,19 +119,89 @@ def simulate(supply, demand, offset=0):
         # Reformat.
         portfolios = portfolios[['day', 'hour', 'portfolio_name', 'revenue', 'cost', 'profit']]
 
-        # Add to hourly stats.
-        hourly = pd.concat([hourly, portfolios])
+        # Add to results.
+        results = pd.concat([results, portfolios])
 
-    # Group by day. 
-    daily = hourly.groupby(['day', 'portfolio_name'], as_index=False).agg({'profit': 'sum'})
+    return results
 
-    # Group by portfolio.
-    aggregate = daily.groupby(['portfolio_name'], as_index=False).agg({'profit': 'sum'})
+def cashflow(results, portfolio, overhead=225000, r=0.05):
+    '''Calculate cashflow of given portfolio based on expected profitability and interest payments.'''
 
-    # Sort by profit.
-    aggregate = aggregate.sort_values(by=['profit'], ascending=False)
+    # Group profits by day. 
+    financials = results.groupby(['day', 'portfolio_name'], as_index=False).agg({'profit': 'sum'})
 
-    return aggregate
+    # Slice by portfolio.
+    financials = financials.loc[financials['portfolio_name'] == portfolio]
+
+    # Add columns.
+    financials['owed'] = None
+    financials['payment'] = None
+    financials['cash_flow'] = None
+
+    # Financing balance. 
+    owed = overhead
+
+    for day in range(1,7):
+
+        # Calculate interest at beginning of each day. 
+        owed *= (1 + r)
+
+        # Track what is owed at the beginning each day.
+        financials.loc[financials['day'] == day, 'owed'] = owed
+
+        # Cash inflow.
+        inflow = financials.loc[financials['day'] == day, 'profit'].iloc[0]
+
+        # Pay off debt.
+        if inflow < 0:
+
+            # Update payment.
+            financials.loc[financials['day'] == day, 'payment'] = 0
+
+            # Update cashflow for period. 
+            financials.loc[financials['day'] == day, 'cash_flow'] = inflow
+
+            # Update owed. 
+            owed -= inflow
+
+        elif inflow <= owed:
+
+            # Update payment.
+            financials.loc[financials['day'] == day, 'payment'] = inflow
+
+            # Update cashflow for period. 
+            financials.loc[financials['day'] == day, 'cash_flow'] = 0
+
+            # Update owed. 
+            owed -= inflow
+        
+        elif owed > 0: 
+
+            # Update payment.
+            financials.loc[financials['day'] == day, 'payment'] = owed
+
+            # Update cashflow for period. 
+            financials.loc[financials['day'] == day, 'cash_flow'] = inflow - owed
+
+            # Update owed. 
+            owed = 0
+
+        else:
+
+            # Update payment.
+            financials.loc[financials['day'] == day, 'payment'] = 0     
+
+            # Update cashflow for period. 
+            financials.loc[financials['day'] == day, 'cash_flow'] = inflow     
+            
+    return financials
+
+def bid(day, hour, portfolio, demand, supply):
+    '''Determine optimal bid for given portfolio on day at hour.'''
+
+
+
+    return
 
 if __name__ == '__main__':
     
@@ -140,32 +214,24 @@ if __name__ == '__main__':
     
     summarize_portfolios(supply)
 
-    #--- SIMULATION ---#
+    #--- BASELINE ---#
 
-    # Output. 
-    output = None
+    # Calculate portfolio profits under merit order dispatch.
+    results = simulate(supply, demand)
 
-    # Calculate baseline profit by portfolio.
-    baseline = simulate(supply, demand, 0)
+    # Group profits by portfolio. 
+    profits = results.groupby(['portfolio_name'], as_index=False).agg({'profit': 'sum'})
 
-    # Rename profit column. 
-    baseline = baseline.rename(columns={'profit': 'MC'})
+    #--- FINANCIALS ---#
 
-    # Update output. 
-    output = baseline
+    # Overhead. 
+    overhead = 225000
 
-    for offset in range(1, 21):
+    # Calculate cashflow of desired portfolio given results.
+    financials = cashflow(results, 'Fossil_Light', overhead, 0.05)
 
-        # Calculate change in profits under exogenous increase in clearing price.
-        new_profit = simulate(supply, demand, offset)
+    # Calculate ROI. 
+    roi = (financials['cash_flow'].sum()/overhead)*100
 
-        # Rename profit column. 
-        new_profit = new_profit.rename(columns={'profit': '$' + str(offset)})
-
-        # Merge on porfolio name. 
-        output = output.merge(new_profit, on='portfolio_name')
-
-    # Write output to CSV.
-    output.to_csv(output_file, index=False)
-
-    print(output)
+    # --- BIDDING ---#
+    
